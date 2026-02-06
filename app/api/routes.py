@@ -178,7 +178,13 @@ def run_ingest(
 @router.get("/tasks/{task_id}")
 def task_status(task_id: str):
     result = AsyncResult(task_id, app=celery_app)
-    return success_response({"task_id": task_id, "state": result.state, "result": result.result})
+    try:
+        state = result.state
+        task_result = result.result
+    except Exception:  # noqa: BLE001
+        state = "unknown"
+        task_result = None
+    return success_response({"task_id": task_id, "state": state, "result": task_result})
 
 
 @router.get("/inbox")

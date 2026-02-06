@@ -83,3 +83,4 @@ Comprehensive project documentation is available under `docs/`:
 - `docs/10_TESTING_AND_QUALITY.MD`
 - `docs/11_RELEASE_RUNBOOK.MD`
 - `docs/12_TROUBLESHOOTING.MD`
+- `docs/13_SOURCE_CATALOG_AND_ONBOARDING.MD`
