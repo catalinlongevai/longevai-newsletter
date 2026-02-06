@@ -1,0 +1,3 @@
+Classify whether the text is directly relevant to human longevity, healthspan, or actionable biohacking.
+Return strict JSON only with fields: is_relevant (bool), urgency (1-10).
+If uncertain, set is_relevant=false and urgency=1.

@@ -1,0 +1,5 @@
+Extract claims first, then citations, then protocols.
+Return strict JSON only with fields:
+is_novel, novelty_score (1-10), wow_factor, confidence_label, summary_markdown,
+needs_human_verification, claims[], citations[][], protocols[].
+Reject medical advice wording and ensure protocol entries include dose units and safety notes.

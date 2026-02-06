@@ -1,0 +1,3 @@
+Validate output quality and evidence consistency.
+Return strict JSON only with fields: passed (bool), contradiction_risk (low|medium|high), notes[]
+Set passed=false when evidence appears contradictory or citation coverage is weak.
