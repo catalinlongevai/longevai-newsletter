@@ -47,6 +47,12 @@ Dry run:
 API_AUTH_TOKEN=dev-token .venv/bin/python scripts/seed_sources.py --dry-run
 ```
 
+Disable non-catalog active sources (recommended when syncing to the approved source set):
+
+```bash
+API_AUTH_TOKEN=dev-token .venv/bin/python scripts/seed_sources.py --disable-unmanaged
+```
+
 ## Next Implementation Steps Per Scaffolded Group
 
 ### LinkedIn / Manual-only sources

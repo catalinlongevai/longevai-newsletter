@@ -64,6 +64,8 @@ make lint
 make typecheck
 make migrate
 make seed
+# Optional: enforce only catalog-defined sources
+API_AUTH_TOKEN=dev-token .venv/bin/python scripts/seed_sources.py --disable-unmanaged
 ```
 
 ## Documentation
