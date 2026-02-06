@@ -59,6 +59,7 @@ class SourceOut(BaseModel):
     trust_tier: str
     last_scraped_at: datetime | None = None
     last_success_at: datetime | None = None
+    next_scheduled_at: datetime | None = None
     last_error: str | None = None
     failure_count: int
 
@@ -134,6 +135,8 @@ class LLMRunOut(BaseModel):
     output_tokens: int | None
     latency_ms: int | None
     cost_usd: float | None
+    raw_response_json: dict = Field(default_factory=dict)
+    prompt_text: str | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -145,6 +148,51 @@ class InsightDetailOut(BaseModel):
     citations: list[CitationOut]
     protocols: list[ProtocolOut]
     llm_runs: list[LLMRunOut]
+
+
+class SourceRunOut(BaseModel):
+    id: int
+    source_id: int
+    trigger_type: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    items_discovered: int
+    items_ingested: int
+    error: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class RawDocumentListItemOut(BaseModel):
+    id: int
+    source_id: int
+    source_name: str
+    external_id: str
+    url: str
+    fetched_at: datetime
+    title: str | None = None
+    status: DocumentStatus
+    text_preview: str
+
+
+class RawDocumentDetailOut(BaseModel):
+    id: int
+    source_id: int
+    source_name: str
+    external_id: str
+    url: str
+    fetched_at: datetime
+    http_meta_json: dict
+    raw_text: str | None = None
+    raw_html: str | None = None
+    content_hash: str
+    document_id: int
+    title: str | None = None
+    published_at: datetime | None = None
+    status: DocumentStatus
+    normalized_text: str
+    llm_runs: list[LLMRunOut] = Field(default_factory=list)
 
 
 class InboxResponse(BaseModel):

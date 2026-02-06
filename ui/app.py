@@ -25,16 +25,37 @@ def _unwrap(response: requests.Response) -> dict:
 st.set_page_config(page_title="LongevAI Control Plane", layout="wide")
 st.title("LongevAI Control Plane")
 
-source_tab, inbox_tab, bundle_tab, metrics_tab = st.tabs(
-    ["Source Management", "Review Inbox", "Bundle & Publish", "Metrics"]
+sources: list[dict] = []
+sources_resp = requests.get(f"{API_BASE_URL}/v1/sources", headers=_headers(), timeout=20)
+if sources_resp.ok:
+    sources = _unwrap(sources_resp)
+
+source_tab, inbox_tab, explorer_tab, bundle_tab, metrics_tab = st.tabs(
+    ["Source Management", "Review Inbox", "Pipeline Explorer", "Bundle & Publish", "Metrics"]
 )
 
 with source_tab:
     st.subheader("Sources")
-    list_resp = requests.get(f"{API_BASE_URL}/v1/sources", headers=_headers(), timeout=20)
-    if list_resp.ok:
-        sources = _unwrap(list_resp)
+    if sources:
         st.dataframe(sources, use_container_width=True)
+    else:
+        st.warning("No sources available.")
+
+    st.subheader("Source Run History (30-day default)")
+    if sources:
+        source_lookup = {f"{source['name']} (#{source['id']})": source["id"] for source in sources}
+        selected_label = st.selectbox("Select source", list(source_lookup.keys()))
+        history_days = st.number_input("History window (days)", min_value=1, max_value=365, value=30)
+        history_resp = requests.get(
+            f"{API_BASE_URL}/v1/sources/{source_lookup[selected_label]}/runs",
+            params={"days": int(history_days), "limit": 200},
+            headers=_headers(),
+            timeout=20,
+        )
+        if history_resp.ok:
+            st.dataframe(_unwrap(history_resp), use_container_width=True)
+        else:
+            st.error(history_resp.text)
 
     st.subheader("Add Source")
     with st.form("add_source"):
@@ -135,6 +156,8 @@ with inbox_tab:
                     st.dataframe(detail_data.get("claims", []), use_container_width=True)
                     st.markdown("Protocols")
                     st.dataframe(detail_data.get("protocols", []), use_container_width=True)
+                    st.markdown("LLM Runs")
+                    st.dataframe(detail_data.get("llm_runs", []), use_container_width=True)
 
                 col_a, col_b = st.columns(2)
                 with col_a:
@@ -155,6 +178,78 @@ with inbox_tab:
                         st.rerun()
     else:
         st.error(resp.text)
+
+with explorer_tab:
+    st.subheader("Raw Document Explorer")
+    source_options = {"All Sources": None}
+    for source in sources:
+        source_options[f"{source['name']} (#{source['id']})"] = source["id"]
+    selected = st.selectbox("Filter by source", list(source_options.keys()))
+    raw_limit = st.slider("Rows", min_value=10, max_value=200, value=50, step=10)
+
+    params = {"limit": raw_limit, "offset": 0}
+    selected_source_id = source_options[selected]
+    if selected_source_id:
+        params["source_id"] = selected_source_id
+
+    raw_resp = requests.get(
+        f"{API_BASE_URL}/v1/raw-documents",
+        params=params,
+        headers=_headers(),
+        timeout=20,
+    )
+    if raw_resp.ok:
+        raw_items = _unwrap(raw_resp)
+        st.dataframe(raw_items, use_container_width=True)
+    else:
+        raw_items = []
+        st.error(raw_resp.text)
+
+    st.subheader("Raw Document Detail")
+    raw_id = st.number_input("Raw Document ID", min_value=1, step=1)
+    if st.button("Load Raw Detail"):
+        detail_resp = requests.get(
+            f"{API_BASE_URL}/v1/raw-documents/{int(raw_id)}",
+            headers=_headers(),
+            timeout=20,
+        )
+        if detail_resp.ok:
+            detail_data = _unwrap(detail_resp)
+            st.write(
+                {
+                    "source": detail_data["source_name"],
+                    "url": detail_data["url"],
+                    "status": detail_data["status"],
+                    "fetched_at": detail_data["fetched_at"],
+                    "title": detail_data.get("title"),
+                }
+            )
+            st.markdown("Raw Text")
+            st.text_area("raw_text", value=detail_data.get("raw_text") or "", height=220)
+            st.markdown("Normalized Text")
+            st.text_area(
+                "normalized_text", value=detail_data.get("normalized_text") or "", height=220
+            )
+            st.markdown("LLM Compression + Prompt")
+            for run in detail_data.get("llm_runs", []):
+                with st.expander(
+                    f"{run['stage']} | {run['provider']}:{run['model']} | v={run['prompt_version']}"
+                ):
+                    st.write(
+                        {
+                            "input_tokens": run.get("input_tokens"),
+                            "output_tokens": run.get("output_tokens"),
+                            "latency_ms": run.get("latency_ms"),
+                            "cost_usd": run.get("cost_usd"),
+                            "created_at": run.get("created_at"),
+                        }
+                    )
+                    st.markdown("Prompt")
+                    st.code(run.get("prompt_text") or "Prompt file not found", language="markdown")
+                    st.markdown("Raw Model Output")
+                    st.json(run.get("raw_response_json") or {})
+        else:
+            st.error(detail_resp.text)
 
 with bundle_tab:
     st.subheader("Build Weekly Bundle")
@@ -177,9 +272,10 @@ with bundle_tab:
 
     bundle_id = st.number_input("Bundle ID", min_value=1, step=1)
     if st.button("Dry Run Publish Check"):
-        st.info("Publish runs in draft mode only; Beehiiv must be enabled in environment.")
+        st.info("Publish is draft-first. Final send is manual in Beehiiv.")
 
     if st.button("Publish Draft to Beehiiv"):
+        st.info("This creates/updates draft content. Send to subscribers manually in Beehiiv UI.")
         resp = requests.post(
             f"{API_BASE_URL}/v1/bundles/{int(bundle_id)}/publish/beehiiv",
             headers=_headers(f"publish-{bundle_id}-{datetime.now(UTC).timestamp()}"),

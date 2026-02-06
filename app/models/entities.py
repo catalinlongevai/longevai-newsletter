@@ -62,6 +62,12 @@ class BundleStatus(str, Enum):
     published = "published"
 
 
+class SourceRunStatus(str, Enum):
+    success = "success"
+    failure = "failure"
+    skipped = "skipped"
+
+
 class Source(Base):
     __tablename__ = "sources"
     __table_args__ = (Index("ix_sources_active_method", "active", "method"),)
@@ -81,6 +87,26 @@ class Source(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=now_utc, onupdate=now_utc, nullable=False
     )
+
+
+class SourceRun(Base):
+    __tablename__ = "source_runs"
+    __table_args__ = (Index("ix_source_runs_source_started", "source_id", "started_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id"), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(String(64), default="scheduled", nullable=False)
+    status: Mapped[SourceRunStatus] = mapped_column(
+        SAEnum(SourceRunStatus), default=SourceRunStatus.success, nullable=False
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    items_discovered: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    items_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_utc, nullable=False)
+
+    source: Mapped[Source] = relationship()
 
 
 class RawDocument(Base):

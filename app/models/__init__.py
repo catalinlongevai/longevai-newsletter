@@ -20,6 +20,8 @@ from app.models.entities import (
     Source,
     SourceCursor,
     SourceMethod,
+    SourceRun,
+    SourceRunStatus,
 )
 
 __all__ = [
@@ -44,4 +46,6 @@ __all__ = [
     "Source",
     "SourceCursor",
     "SourceMethod",
+    "SourceRun",
+    "SourceRunStatus",
 ]

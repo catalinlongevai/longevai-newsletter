@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from celery.result import AsyncResult
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -17,6 +19,7 @@ from app.models.entities import (
     PublishBundle,
     RawDocument,
     Source,
+    SourceRun,
     SourceMethod,
 )
 from app.schemas import (
@@ -33,8 +36,11 @@ from app.schemas import (
     ManualIngestRequest,
     PipelineMetricsOut,
     ProtocolOut,
+    RawDocumentDetailOut,
+    RawDocumentListItemOut,
     SourceCreate,
     SourceOut,
+    SourceRunOut,
     SourceUpdate,
 )
 from app.services.audit import record_audit
@@ -42,6 +48,7 @@ from app.services.idempotency import resolve_cached_response, store_response
 from app.services.pipeline import bump_metric, get_pipeline_metrics, upsert_raw_document
 from app.services.publish.beehiiv import publish_draft
 from app.services.publish.bundle import build_bundle
+from app.services.llm.prompts import prompt_for
 from app.state_machine.document_status import enforce_transition
 from app.tasks.celery_app import celery_app
 from app.tasks.jobs import ingest_sources, triage_document
@@ -51,10 +58,54 @@ from app.core.time import now_utc
 router = APIRouter(prefix="/v1", tags=["v1"])
 
 
+def _next_scheduled_at(source: Source):
+    if not source.last_scraped_at:
+        return None
+    return source.last_scraped_at + timedelta(minutes=source.poll_interval_min)
+
+
+def _serialize_llm_run(run: LLMRun) -> dict:
+    llm_run = LLMRunOut.model_validate(run).model_dump(mode="json")
+    try:
+        llm_run["prompt_text"] = prompt_for(run.prompt_version)
+    except OSError:
+        llm_run["prompt_text"] = None
+    return llm_run
+
+
 @router.get("/sources")
 def list_sources(db: Session = Depends(get_db)):
     sources = db.query(Source).order_by(Source.name.asc()).all()
-    return success_response([SourceOut.model_validate(source).model_dump(mode="json") for source in sources])
+    payload = []
+    for source in sources:
+        item = SourceOut.model_validate(source).model_dump(mode="json")
+        item["next_scheduled_at"] = (
+            _next_scheduled_at(source).isoformat() if _next_scheduled_at(source) else None
+        )
+        payload.append(item)
+    return success_response(payload)
+
+
+@router.get("/sources/{source_id}/runs")
+def list_source_runs(
+    source_id: int,
+    days: int = Query(default=30, ge=1, le=365),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+):
+    source = db.query(Source).filter(Source.id == source_id).one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Source not found")
+    cutoff = now_utc() - timedelta(days=days)
+    runs = (
+        db.query(SourceRun)
+        .filter(SourceRun.source_id == source_id, SourceRun.started_at >= cutoff)
+        .order_by(SourceRun.started_at.desc())
+        .limit(limit)
+        .all()
+    )
+    payload = [SourceRunOut.model_validate(run).model_dump(mode="json") for run in runs]
+    return success_response(payload, meta={"days": days, "limit": limit})
 
 
 @router.post("/sources")
@@ -141,7 +192,6 @@ def manual_ingest(
         },
     )
     document = db.query(Document).filter(Document.raw_document_id == raw.id).one()
-    task = triage_document.delay(document.id)
 
     record_audit(
         db,
@@ -151,6 +201,9 @@ def manual_ingest(
         document.id,
         payload.model_dump(),
     )
+    db.commit()
+
+    task = triage_document.delay(document.id)
     response = {"document_id": document.id, "task_id": task.id}
     store_response(db, idempotency_key, "/v1/manual-ingest", payload.model_dump(), response)
     db.commit()
@@ -168,7 +221,7 @@ def run_ingest(
     if cached:
         return success_response(cached)
 
-    task = ingest_sources.delay(payload.source_id)
+    task = ingest_sources.delay(payload.source_id, "manual")
     response = {"task_id": task.id, "source_id": payload.source_id}
     store_response(db, idempotency_key, "/v1/ingest/run", payload.model_dump(), response)
     db.commit()
@@ -247,7 +300,79 @@ def insight_detail(insight_id: int, db: Session = Depends(get_db)):
         claims=[ClaimOut.model_validate(claim) for claim in claims],
         citations=[CitationOut.model_validate(citation) for citation in citations],
         protocols=[ProtocolOut.model_validate(protocol) for protocol in protocols],
-        llm_runs=[LLMRunOut.model_validate(run) for run in llm_runs],
+        llm_runs=[LLMRunOut.model_validate(_serialize_llm_run(run)) for run in llm_runs],
+    )
+    return success_response(payload.model_dump(mode="json"))
+
+
+@router.get("/raw-documents")
+def list_raw_documents(
+    source_id: int | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+):
+    query = db.query(RawDocument, Source, Document).join(Source, Source.id == RawDocument.source_id).join(
+        Document, Document.raw_document_id == RawDocument.id
+    )
+    if source_id:
+        query = query.filter(RawDocument.source_id == source_id)
+
+    total = query.count()
+    rows = query.order_by(RawDocument.fetched_at.desc()).offset(offset).limit(limit).all()
+    items = []
+    for raw, source, document in rows:
+        preview = (raw.raw_text or "")[:500]
+        items.append(
+            RawDocumentListItemOut(
+                id=raw.id,
+                source_id=source.id,
+                source_name=source.name,
+                external_id=raw.external_id,
+                url=raw.url,
+                fetched_at=raw.fetched_at,
+                title=document.title,
+                status=document.status,
+                text_preview=preview,
+            ).model_dump(mode="json")
+        )
+
+    return success_response(items, meta={"limit": limit, "offset": offset, "total": total})
+
+
+@router.get("/raw-documents/{raw_document_id}")
+def raw_document_detail(raw_document_id: int, db: Session = Depends(get_db)):
+    row = (
+        db.query(RawDocument, Source, Document)
+        .join(Source, Source.id == RawDocument.source_id)
+        .join(Document, Document.raw_document_id == RawDocument.id)
+        .filter(RawDocument.id == raw_document_id)
+        .one_or_none()
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Raw document not found")
+
+    raw, source, document = row
+    llm_runs = (
+        db.query(LLMRun).filter(LLMRun.document_id == document.id).order_by(LLMRun.created_at.asc()).all()
+    )
+    payload = RawDocumentDetailOut(
+        id=raw.id,
+        source_id=source.id,
+        source_name=source.name,
+        external_id=raw.external_id,
+        url=raw.url,
+        fetched_at=raw.fetched_at,
+        http_meta_json=raw.http_meta_json,
+        raw_text=raw.raw_text,
+        raw_html=raw.raw_html,
+        content_hash=raw.content_hash,
+        document_id=document.id,
+        title=document.title,
+        published_at=document.published_at,
+        status=document.status,
+        normalized_text=document.normalized_text,
+        llm_runs=[LLMRunOut.model_validate(_serialize_llm_run(run)) for run in llm_runs],
     )
     return success_response(payload.model_dump(mode="json"))
 

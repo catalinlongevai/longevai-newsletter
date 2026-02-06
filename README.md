@@ -32,6 +32,7 @@ Write endpoints require:
 ## API (Core)
 
 - `GET /v1/sources`
+- `GET /v1/sources/{id}/runs`
 - `POST /v1/sources`
 - `PATCH /v1/sources/{id}`
 - `POST /v1/manual-ingest`
@@ -39,6 +40,8 @@ Write endpoints require:
 - `GET /v1/tasks/{id}`
 - `GET /v1/inbox`
 - `GET /v1/insights/{id}`
+- `GET /v1/raw-documents`
+- `GET /v1/raw-documents/{id}`
 - `POST /v1/insights/{id}/approve`
 - `POST /v1/insights/{id}/reject`
 - `PATCH /v1/insights/{id}`

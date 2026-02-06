@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     llm_max_retries: int = 3
     ingest_http_timeout_seconds: int = 20
     idempotency_ttl_hours: int = 168
+    source_run_retention_days: int = 30
 
     @property
     def allowed_fetch_host_list(self) -> list[str]:

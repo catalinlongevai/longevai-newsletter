@@ -4,6 +4,7 @@ from datetime import timedelta
 from celery.utils.log import get_task_logger
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.observability import TASK_COUNT
 from app.core.time import now_utc
 from app.db.session import get_session_maker
@@ -12,6 +13,8 @@ from app.models.entities import (
     DocumentStatus,
     JobDeadLetter,
     LLMStage,
+    SourceRun,
+    SourceRunStatus,
     Source,
     SourceCursor,
     SourceMethod,
@@ -51,9 +54,14 @@ def cleanup_idempotency() -> dict:
     db = _db()
     try:
         removed = cleanup_expired_keys(db)
+        settings = get_settings()
+        cutoff = now_utc() - timedelta(days=max(1, settings.source_run_retention_days))
+        removed_runs = (
+            db.query(SourceRun).filter(SourceRun.started_at < cutoff).delete(synchronize_session=False)
+        )
         db.commit()
         TASK_COUNT.labels("cleanup_idempotency", "success").inc()
-        return {"deleted": removed}
+        return {"deleted_idempotency": removed, "deleted_source_runs": removed_runs}
     except Exception:  # noqa: BLE001
         db.rollback()
         TASK_COUNT.labels("cleanup_idempotency", "failure").inc()
@@ -63,7 +71,7 @@ def cleanup_idempotency() -> dict:
 
 
 @celery_app.task(name="app.tasks.jobs.ingest_sources")
-def ingest_sources(source_id: int | None = None) -> dict:
+def ingest_sources(source_id: int | None = None, trigger: str = "scheduled") -> dict:
     db = _db()
     try:
         sources_query = db.query(Source).filter(Source.active.is_(True))
@@ -75,28 +83,61 @@ def ingest_sources(source_id: int | None = None) -> dict:
         for source in sources:
             source.last_scraped_at = now_utc()
             cooldown_sec = int((source.config_json or {}).get("cooldown_seconds", 0) or 0)
+            source_run = SourceRun(
+                source_id=source.id,
+                trigger_type=trigger,
+                status=SourceRunStatus.success,
+                started_at=now_utc(),
+                items_discovered=0,
+                items_ingested=0,
+            )
+            db.add(source_run)
+            db.flush()
             if source.last_success_at and cooldown_sec > 0:
                 if source.last_success_at + timedelta(seconds=cooldown_sec) > now_utc():
+                    source_run.status = SourceRunStatus.skipped
+                    source_run.error = "cooldown_active"
+                    source_run.finished_at = now_utc()
+                    db.commit()
                     continue
 
             try:
                 items = asyncio.run(_fetch_for_source(db, source))
+                source_run.items_discovered = len(items)
+                queued_doc_ids: list[int] = []
                 for item in items:
                     raw = upsert_raw_document(db, source, item.model_dump())
                     doc = db.query(Document).filter(Document.raw_document_id == raw.id).one()
                     run_dedup_for_document(db, doc)
-                    triage_document.delay(doc.id)
+                    queued_doc_ids.append(doc.id)
+                    source_run.items_ingested += 1
                     ingested += 1
                 source.last_success_at = now_utc()
                 source.failure_count = 0
                 source.last_error = None
+                source_run.status = SourceRunStatus.success
+                source_run.finished_at = now_utc()
                 db.commit()
+                for queued_doc_id in queued_doc_ids:
+                    triage_document.delay(queued_doc_id)
                 TASK_COUNT.labels("ingest_sources", "success").inc()
             except Exception as exc:  # noqa: BLE001
                 db.rollback()
                 source.failure_count += 1
                 source.last_error = str(exc)
                 db.add(source)
+                db.add(
+                    SourceRun(
+                        source_id=source.id,
+                        trigger_type=trigger,
+                        status=SourceRunStatus.failure,
+                        started_at=now_utc(),
+                        finished_at=now_utc(),
+                        items_discovered=0,
+                        items_ingested=0,
+                        error=str(exc),
+                    )
+                )
                 db.commit()
                 _dead_letter(db, "ingest_sources", {"source_id": source.id}, exc, source_id=source.id)
                 TASK_COUNT.labels("ingest_sources", "failure").inc()
@@ -158,16 +199,19 @@ def triage_document(document_id: int) -> dict:
                 raw_response_json=raw,
             ),
         )
+        enqueue_analysis = False
         if triage.is_relevant:
             enforce_transition(doc.status, DocumentStatus.triaged)
             doc.status = DocumentStatus.triaged
             bump_metric(db, "triaged_count")
-            analyze_document.delay(doc.id)
+            enqueue_analysis = True
         else:
             enforce_transition(doc.status, DocumentStatus.rejected)
             doc.status = DocumentStatus.rejected
             bump_metric(db, "rejected_count")
         db.commit()
+        if enqueue_analysis:
+            analyze_document.delay(doc.id)
         TASK_COUNT.labels("triage_document", "success").inc()
         return {"is_relevant": triage.is_relevant}
     except Exception as exc:  # noqa: BLE001
@@ -201,8 +245,8 @@ def analyze_document(document_id: int) -> dict:
             ),
         )
         save_analysis(db, doc, analysis)
-        verify_document.delay(doc.id)
         db.commit()
+        verify_document.delay(doc.id)
         TASK_COUNT.labels("analyze_document", "success").inc()
         return {"novelty": analysis.novelty_score}
     except Exception as exc:  # noqa: BLE001
